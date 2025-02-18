@@ -41,6 +41,7 @@ from sqlalchemy import (
 )
 from sqlalchemy import Enum as sa_Enum
 from sqlalchemy.orm import (
+    mapped_column,
     Mapped,
     MappedColumn,
     RelationshipProperty,
@@ -342,7 +343,7 @@ def Field(
     regex: Optional[str] = None,
     discriminator: Optional[str] = None,
     repr: bool = True,
-    sa_column: Union[Column, UndefinedType] = Undefined,  # type: ignore
+    sa_column: Union[Column, MappedColumn, UndefinedType] = Undefined,  # type: ignore
     schema_extra: Optional[Dict[str, Any]] = None,
 ) -> Any: ...
 
@@ -384,7 +385,7 @@ def Field(
     nullable: Union[bool, UndefinedType] = Undefined,
     index: Union[bool, UndefinedType] = Undefined,
     sa_type: Union[Type[Any], UndefinedType] = Undefined,
-    sa_column: Union[Column, UndefinedType] = Undefined,  # type: ignore
+    sa_column: Union[Column, MappedColumn, UndefinedType] = Undefined,  # type: ignore
     sa_column_args: Union[Sequence[Any], UndefinedType] = Undefined,
     sa_column_kwargs: Union[Mapping[str, Any], UndefinedType] = Undefined,
     schema_extra: Optional[Dict[str, Any]] = None,
@@ -646,6 +647,49 @@ class SQLModelMetaclass(ModelMetaclass, DeclarativeMeta):
             ModelMetaclass.__init__(cls, classname, bases, dict_, **kw)
 
 
+def get_sqlalchemy_type_override(field: Any) -> Optional[Any]:
+    if IS_PYDANTIC_V2:
+        field_info = field
+    else:
+        field_info = field.field_info
+
+    sa_type = getattr(field_info, "sa_type", Undefined)  # noqa: B009
+    if sa_type is not Undefined:
+        return sa_type
+
+    type_ = get_sa_type_from_field(field)
+    metadata = get_field_metadata(field)
+    max_length = getattr(metadata, "max_length", None)
+    max_digits =  getattr(metadata, "max_digits", None)
+    decimal_places = getattr(metadata, "decimal_places", None)
+
+    if issubclass(type_, Enum):
+        return sa_Enum(type_)
+    if max_length is not None:
+        if issubclass(
+                type_,
+                (
+                    str,
+                    ipaddress.IPv4Address,
+                    ipaddress.IPv4Network,
+                    ipaddress.IPv6Address,
+                    ipaddress.IPv6Network,
+                    Path,
+                    EmailStr,
+                ),
+            ):
+                return AutoString(length=metadata.max_length)
+
+    if max_digits is not None or decimal_places is not None:
+        if issubclass(type_, Decimal):
+            return Numeric(
+                precision=getattr(metadata, "max_digits", None),
+                scale=getattr(metadata, "decimal_places", None),
+            )
+
+    return None
+
+
 def get_sqlalchemy_type(field: Any) -> Any:
     if IS_PYDANTIC_V2:
         field_info = field
@@ -712,6 +756,8 @@ def get_column_from_field(field: Any) -> Union[Column, MappedColumn]:  # type: i
     if isinstance(sa_column, (Column, MappedColumn)):
         return sa_column
     sa_type = get_sqlalchemy_type(field)
+    sa_type_override = get_sqlalchemy_type_override(field)
+
     primary_key = getattr(field_info, "primary_key", Undefined)
     if primary_key is Undefined:
         primary_key = False
@@ -760,7 +806,17 @@ def get_column_from_field(field: Any) -> Union[Column, MappedColumn]:  # type: i
     sa_column_kwargs = getattr(field_info, "sa_column_kwargs", Undefined)
     if sa_column_kwargs is not Undefined:
         kwargs.update(cast(Dict[Any, Any], sa_column_kwargs))
-    return Column(sa_type, *args, **kwargs)  # type: ignore
+    # TODO: look at using mapped_column as constructor
+    #print(f"passing args to mapped_column:  type_override: {sa_type_override}, args: {args}, kwargs: {kwargs}")
+    if sa_type_override is not None:
+        args.insert(0, sa_type_override)
+    #args.insert(0, sa_type)
+    # print(f"passing args to mapped_column:  type_override: {sa_type_override}, args: {args}, kwargs: {kwargs}")
+    #return mapped_column(sa_type, *args, **kwargs)  # type: ignore
+    return mapped_column(*args, **kwargs)  # type: ignore
+    #return MappedColumn(sa_type, *args, **kwargs)  # type: ignore
+    #return MappedColumn(sa_type, *args, **kwargs)  # type: ignore
+    #return Column(sa_type, *args, **kwargs)  # type: ignore
 
 
 class_registry = weakref.WeakValueDictionary()  # type: ignore
